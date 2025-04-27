@@ -1,4 +1,6 @@
 # netlify analytics
 single page netlify analytics app
 
-just add env vars to .eng
+copy .env.example to .env 
+
+then just add env vars to .env
