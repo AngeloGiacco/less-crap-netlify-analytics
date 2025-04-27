@@ -1,10 +1,4 @@
 import { toast } from "sonner";
-
-const NETLIFY_API_KEY = import.meta.env.VITE_NETLIFY_API_KEY;
-const SITE_ID = import.meta.env.VITE_SITE_ID;
-
-const BASE_URL = 'https://analytics.services.netlify.com/v2';
-
 interface DataPoint {
   timestamp: number;
   value: number;
@@ -49,100 +43,70 @@ type EmptyResponse = { data: [] };
 
 export type TimeRange = '7d' | '30d' | '3m' | '1y';
 
+// This function now calls our Netlify Function proxy
 const fetchNetlifyData = async (
   endpoint: string,
   params?: Record<string, string | number>,
   timeRange: TimeRange = '30d'
 ): Promise<any | EmptyResponse> => {
-  const now = Date.now();
-  let fromTimestamp: number;
+  const functionUrl = '/.netlify/functions/api'; // Default path, change if you set config.path
 
-  switch (timeRange) {
-    case '7d':
-      fromTimestamp = now - 7 * 24 * 60 * 60 * 1000;
-      break;
-    case '3m':
-
-      fromTimestamp = now - 90 * 24 * 60 * 60 * 1000;
-      break;
-    case '1y':
-      fromTimestamp = now - 365 * 24 * 60 * 60 * 1000;
-      break;
-    case '30d':
-    default:
-      fromTimestamp = now - 30 * 24 * 60 * 60 * 1000;
-      break;
-  }
-
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-  const queryParams: Record<string, string | number> = {
-    from: fromTimestamp,
-    to: now,
-    timezone: timezone,
-    ...params,
-  };
-
-  const queryString = Object.entries(queryParams)
-    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
-    .join('&');
-
-  const url = `${BASE_URL}/${SITE_ID}${endpoint}?${queryString}`;
-  console.log("Fetching URL:", url, "for time range:", timeRange);
+  console.log("Calling proxy function:", functionUrl, "for endpoint:", endpoint, "time range:", timeRange);
 
   try {
-    const response = await fetch(url, {
+    // Get client timezone to send to the function
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+    const response = await fetch(functionUrl, {
+      method: 'POST',
       headers: {
-        'Authorization': `Bearer ${NETLIFY_API_KEY}`,
+        'Content-Type': 'application/json',
+        'X-Client-Timezone': timezone, // Send timezone as a header
       },
+      body: JSON.stringify({
+        endpoint,
+        params,
+        timeRange,
+      }),
     });
 
     if (!response.ok) {
-       const errorBody = await response.text();
-       console.error("Netlify API Error:", response.status, response.statusText, errorBody);
-       toast.error(`API Error fetching ${endpoint} (${timeRange}): ${response.statusText}. Check console.`);
-       return { data: [] };
+       let errorData;
+       try {
+           errorData = await response.json(); // Try to parse error details from function
+           console.error("Proxy Function Error Response:", response.status, response.statusText, errorData);
+           toast.error(`API Error fetching ${endpoint} (${timeRange}): ${errorData.error || response.statusText}. Check console.`);
+       } catch (parseError) {
+           const errorBody = await response.text(); // Fallback to text
+           console.error("Proxy Function Error (non-JSON):", response.status, response.statusText, errorBody);
+           toast.error(`API Error fetching ${endpoint} (${timeRange}): ${response.statusText}. Check console.`);
+       }
+       return { data: [] }; // Return empty on error
     }
 
     const jsonData = await response.json();
 
-    if (endpoint.includes('/ranking/sources')) {
-      console.log('Raw Netlify Sources Response:', JSON.stringify(jsonData, null, 2));
+    // Logging received data (optional, but can be helpful)
+    console.log(`Received data for ${endpoint} (${timeRange}) from proxy:`, jsonData);
+
+    // Basic validation: ensure 'data' property exists, even if it's empty
+    if (typeof jsonData !== 'object' || jsonData === null || !jsonData.hasOwnProperty('data')) {
+        console.warn(`Proxy response for ${endpoint} (${timeRange}) is missing 'data' property. Returning empty. Response:`, jsonData);
+        toast.error(`Unexpected data format received for ${endpoint} (${timeRange}).`);
+        return { data: [] };
     }
-    if (endpoint.includes('/ranking/pages')) {
-      console.log('Raw Netlify Pages Response:', JSON.stringify(jsonData, null, 2));
-    }
-     if (endpoint.includes('/ranking/not_found')) {
-        console.log('Raw Netlify Not Found Response:', JSON.stringify(jsonData, null, 2));
-    }
-     if (endpoint === '/bandwidth') {
 
-        if (!jsonData.data || !Array.isArray(jsonData.data)) {
-             console.warn("Bandwidth data structure mismatch for", timeRange, ", wrapping:", jsonData);
-             if (jsonData.start && jsonData.end && jsonData.siteBandwidth !== undefined) {
-                return { data: [jsonData] };
-             }
 
-             if (typeof jsonData === 'object' && Object.keys(jsonData).length === 0) {
-                return { data: [] };
-             }
-
-             return { data: [] };
-        } else if (jsonData.data.length === 0) {
-
-             console.log("Received empty data array for bandwidth for", timeRange);
-             return { data: [] };
-        }
-     }
-
-    return jsonData;
-  } catch (error) {
-     console.error(`Error in fetchNetlifyData for ${endpoint} (${timeRange}):`, error);
-     toast.error(`Failed fetching ${endpoint} (${timeRange}). Check console.`);
+    return jsonData; // Return the data received from the proxy function
+  } catch (error: any) {
+     // Network errors or other issues calling the proxy function itself
+     console.error(`Error calling proxy function for ${endpoint} (${timeRange}):`, error);
+     toast.error(`Failed calling API proxy for ${endpoint} (${timeRange}). Check console.`);
      return { data: [] };
   }
 };
 
+// Exported functions remain the same, they just use the updated fetchNetlifyData
 export const getPageViews = (timeRange: TimeRange): Promise<TimeSeriesResponse | EmptyResponse> =>
   fetchNetlifyData('/pageviews', undefined, timeRange);
 export const getVisitors = (timeRange: TimeRange): Promise<TimeSeriesResponse | EmptyResponse> =>
@@ -158,6 +122,7 @@ export const getPages = (timeRange: TimeRange): Promise<GenericRankingResponse |
 export const getNotFound = (timeRange: TimeRange): Promise<GenericRankingResponse | EmptyResponse> =>
   fetchNetlifyData('/ranking/not_found', { limit: 15 }, timeRange);
 
+// formatBytes remains the same
 const formatBytes = (bytes: number, decimals = 2): string => {
   if (bytes === 0) return '0 Bytes';
   const k = 1024;
@@ -167,41 +132,66 @@ const formatBytes = (bytes: number, decimals = 2): string => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
+// exportToCsv remains largely the same, but check data structure assumptions
 export const exportToCsv = (data: any[], filename: string) => {
   if (!data || data.length === 0) {
     toast.error("No data available to export.");
     return;
   }
 
-  const firstItem = data[0];
-  if (!firstItem || Object.keys(firstItem).length === 0) {
+  // Add extra check: If data looks like { data: [...] }, extract the inner array
+  let actualData = data;
+  if (Array.isArray(data) && data.length === 1 && data[0]?.data && Array.isArray(data[0].data)) {
+      console.warn("Exporting data that seems wrapped in an extra object layer, extracting inner .data array");
+      actualData = data[0].data;
+  } else if (data && (data as any).data && Array.isArray((data as any).data)) {
+       console.warn("Exporting data that seems wrapped in an extra object layer, extracting inner .data array (non-array input)");
+       actualData = (data as any).data;
+  }
+
+  if (!actualData || actualData.length === 0) {
+       toast.error("No valid data found after potential unwrapping.");
+       return;
+   }
+
+
+  const firstItem = actualData[0];
+   // Check added for Array.isArray(firstItem) for pageviews/visitors
+  if (!firstItem || (typeof firstItem !== 'object' && !Array.isArray(firstItem)) || Object.keys(firstItem).length === 0) {
      toast.error("Data format is invalid for export.");
+     console.error("Invalid first item for export:", firstItem);
      return;
   }
 
-  let processedData = data;
+
+  let processedData = actualData;
   let headersOrder: string[] | null = null;
 
-  if (filename === 'bandwidth' && data.length > 0 && data[0].siteBandwidth !== undefined) {
+  // --- Logic for different filenames ---
+   if (filename === 'bandwidth' && actualData.length > 0 && firstItem.siteBandwidth !== undefined) {
       headersOrder = ['siteBandwidth', 'accountBandwidth', 'start', 'end'];
-      processedData = data.map(item => ({
+      processedData = actualData.map(item => ({
           siteBandwidth: formatBytes(item.siteBandwidth),
           accountBandwidth: formatBytes(item.accountBandwidth),
-          start: new Date(item.start).toLocaleString(),
-          end: new Date(item.end).toLocaleString()
+          start: item.start ? new Date(item.start).toLocaleString() : 'N/A', // Add check for start/end
+          end: item.end ? new Date(item.end).toLocaleString() : 'N/A'
       }));
-  } else if (filename === 'not_found' && data.length > 0 && data[0].resource !== undefined) {
+  } else if (filename === 'not_found' && actualData.length > 0 && firstItem.resource !== undefined) {
      headersOrder = ['resource', 'count'];
-  } else if (filename === 'countries' && data.length > 0 && data[0].resource !== undefined) {
-      headersOrder = ['resource', 'country_name', 'count'];
-  } else if (filename === 'sources' && data.length > 0 && data[0].resource !== undefined) {
+  } else if (filename === 'countries' && actualData.length > 0 && firstItem.resource !== undefined) {
+      // Make sure country_name exists if needed
+      headersOrder = firstItem.country_name !== undefined ? ['resource', 'country_name', 'count'] : ['resource', 'count'];
+  } else if (filename === 'sources' && actualData.length > 0 && firstItem.resource !== undefined) {
       headersOrder = ['resource', 'count'];
-  } else if (filename === 'pages' && data.length > 0 && data[0].resource !== undefined) {
+  } else if (filename === 'pages' && actualData.length > 0 && firstItem.resource !== undefined) {
       headersOrder = ['resource', 'count'];
-  } else if ((filename === 'pageviews' || filename === 'visitors') && data.length > 0 && Array.isArray(data[0])) {
-
+   // Updated check for pageviews/visitors to ensure firstItem is an array
+  } else if ((filename === 'pageviews' || filename === 'visitors') && actualData.length > 0 && Array.isArray(firstItem)) {
+      // Data is expected as [[timestamp, value], [timestamp, value], ...]
+      // The data passed to exportToCsv from Analytics.tsx is already formatted correctly
       const headerRow = ["Date", "Count"];
-      const rows = processedData.map(row => row.join(","));
+      // Ensure rows are arrays before joining
+      const rows = processedData.map(row => Array.isArray(row) ? row.join(",") : '');
       const csvContent = "data:text/csv;charset=utf-8," + headerRow.join(",") + "\n" + rows.join("\n");
 
        const encodedUri = encodeURI(csvContent);
@@ -212,17 +202,33 @@ export const exportToCsv = (data: any[], filename: string) => {
        link.click();
        document.body.removeChild(link);
        toast.success(`Exported ${filename}.csv successfully!`);
-       return;
+       return; // Exit early for this specific format
   }
+   // --- Fallback/Default Logic ---
+   else if (actualData.length > 0 && typeof firstItem === 'object' && !Array.isArray(firstItem)) {
+       // Fallback if no specific format matched but it's an array of objects
+       console.warn(`Using default object keys for export format: ${filename}`);
+       headersOrder = Object.keys(firstItem);
+   } else {
+       toast.error(`Cannot determine export format for ${filename}.`);
+       console.error("Unhandled data format for export:", actualData);
+       return;
+   }
 
-  const headers = headersOrder ? headersOrder.join(",") : Object.keys(processedData[0]).join(",");
+
+  // --- CSV Generation (for object arrays) ---
+  const headers = headersOrder ? headersOrder.join(",") : ''; // Should always have headersOrder if we reach here
 
   const rows = processedData.map(row => {
+      // Ensure row is an object before processing
+       if (typeof row !== 'object' || row === null) return '';
       const orderedValues = headersOrder ? headersOrder.map(header => row[header]) : Object.values(row);
       return orderedValues.map(value => {
-          const stringValue = String(value ?? '');
-          const escapedValue = stringValue.includes('"') ? stringValue.replace(/"/g, '""') : stringValue;
-          return stringValue.includes(',') ? `"${escapedValue}"` : escapedValue;
+          const stringValue = String(value ?? ''); // Handle null/undefined
+          // Escape double quotes and wrap in double quotes if value contains a comma or double quote
+          const needsQuotes = stringValue.includes(',') || stringValue.includes('"');
+          const escapedValue = stringValue.replace(/"/g, '""');
+          return needsQuotes ? `"${escapedValue}"` : escapedValue;
       }).join(",");
   });
 
