@@ -46,18 +46,18 @@ export type TimeRange = '7d' | '30d' | '3m' | '1y';
 
 // These should be set as secure environment variables in Netlify build settings
 const NETLIFY_API_KEY = Netlify.env.get("NETLIFY_API_KEY");
-const SITE_ID = Netlify.env.get("SITE_ID"); // Use non-prefixed variable
+const SITE_ID = Netlify.env.get("NETLIFY_SITE_ID"); // Use non-prefixed variable
 
 const BASE_URL = 'https://analytics.services.netlify.com/v2';
 
 if (!NETLIFY_API_KEY || !SITE_ID) {
-  console.error("Missing required environment variables: NETLIFY_API_KEY or SITE_ID");
+  console.error("Missing required environment variables: NETLIFY_API_KEY or NETLIFY_SITE_ID");
   // Don't throw here in the global scope, handle in the handler
 }
 
 export default async (req: Request, context: Context): Promise<Response> => {
   if (!NETLIFY_API_KEY || !SITE_ID) {
-    console.error("Function Error: Missing NETLIFY_API_KEY or SITE_ID environment variables.");
+    console.error("Function Error: Missing NETLIFY_API_KEY or NETLIFY_SITE_ID environment variables.");
     return new Response(JSON.stringify({ error: "Internal server configuration error." }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
